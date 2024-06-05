@@ -1,0 +1,63 @@
+use pro_db.pro_schema;
+
+use role dev_role;
+
+truncate customer_raw;
+
+truncate orders_raw;
+
+select * from customer_raw;
+
+select * from orders_raw;
+
+//to create storage integration for accessing S3 data in Snowflake.
+CREATE or replace STORAGE INTEGRATION S3_INTEGRATION_PRO
+  TYPE = EXTERNAL_STAGE
+  STORAGE_PROVIDER = S3
+  STORAGE_AWS_ROLE_ARN = 'arn:aws:iam::_:role/Snowflake_Access_Role'
+  ENABLED = TRUE
+  STORAGE_ALLOWED_LOCATIONS = ('s3://snowdpownerfirehose/');
+  
+DESC INTEGRATION S3_INTEGRATION_PRO; //trust relationship dtais
+
+//To create external stage for loading data into Snowflake.
+CREATE OR REPLACE STAGE CUSTOMER_RAW_STAGE
+  URL='s3://snowdpowner/firehose/customers/'
+  STORAGE_INTEGRATION = S3_INTEGRATION_PRO
+  FILE_FORMAT=CSV_FORMAT; 
+  
+CREATE OR REPLACE STAGE ORDERS_RAW_STAGE
+  URL='s3://snowdpowner/firehose/orders/'
+  STORAGE_INTEGRATION = S3_INTEGRATION_PRO
+  FILE_FORMAT=CSV_FORMAT; 
+
+//Copy command to copy data from stage to snowflake table CUSTOMER_RAW.  
+copy into PRO_DB.PRO_SCHEMA.CUSTOMER_RAW
+(C_CUSTKEY, C_NAME, C_ADDRESS, C_NATIONKEY, C_PHONE, C_ACCTBAL, C_MKTSEGMENT, C_COMMENT, BATCH_ID) from
+( select t.col1,t.col2,t.col3,t.col4,t.col5,t.col6,t.col7,t.col8,'202401114020201' from @CUSTOMER_RAW_STAGE t);  
+
+//Transformation query
+select c.c_name as customer_name, o.o_orderdate as order_date,sum(o.o_totalprice) as order_total_price from orders_raw o join customer_raw c on o.o_custkey = c.C_custkey
+where o_orderstatus= 'F'
+group by c_name,o_orderdate, c.batch_id
+order by o_orderdate;
+
+//Some command for providing access to roles
+grant select on all tables in schema pro_schema to dev_role;
+
+show GRANTS on schema pro_schema;
+
+use role securityadmin;
+grant MANAGE GRANTS on  to pro_developer_role;
+use role dev_role;
+
+//Creaing table for transformation data
+Create table ORDER_CUSTOMER_DATE_PRICE (CUSTOMER_NAME VARCHAR(25), ORDER_DATE DATE, ORDER_TOTAL_PRICE NUMBER(12,2), BATCH_ID FLOAT);
+
+//Transformation query used in DAG
+insert into ORDER_CUSTOMER_DATE_PRICE (CUSTOMER_NAME, ORDER_DATE, ORDER_TOTAL_PRICE, BATCH_ID) 
+select c.c_name as customer_name, o.o_orderdate as order_date,sum(o.o_totalprice) as order_total_price, c.batch_id
+from orders_raw o join customer_raw c on o.o_custkey = c.C_custkey and o.batch_id = c.batch_id
+where o_orderstatus= 'F'
+group by c_name,o_orderdate, c.batch_id
+order by o_orderdate;
